@@ -2,6 +2,7 @@
 import './index.css'
 import '@saladtechnologies/garden-fonts'
 import 'react-hint/css/index.css'
+import 'react-loading-skeleton/dist/skeleton.css'
 import 'react-toastify/dist/ReactToastify.css'
 
 // Import polyfills. Order is important!
@@ -57,11 +58,14 @@ if (!window.salad) {
 console.log(`Running web app build:${config.appBuild}`)
 
 const client = createClient()
-const featureManager = new UnleashFeatureManager()
+const featureManager = new UnleashFeatureManager(config)
 
 setTimeout(() => {
   const rootStore = createStore(client, featureManager)
-  const routerHistory = createBrowserHistory()
+  const basename = config.appRoutingBasename
+  const routerHistory = createBrowserHistory({
+    basename: basename ? basename : '/',
+  })
 
   let currentLocation: any = null
 
@@ -97,7 +101,7 @@ setTimeout(() => {
         <RawIntlProvider value={intl}>
           <EmotionThemeProvider theme={EmotionTheme}>
             <JSSThemeProvider theme={JSSTheme}>
-              <SkeletonTheme color={'#172E40'} highlightColor="#304759">
+              <SkeletonTheme baseColor="#172E40" highlightColor="#304759">
                 <ErrorBoundary>
                   {/* Default page title for any page that doesn't specify one */}
                   <Head title="Salad Technologies" />

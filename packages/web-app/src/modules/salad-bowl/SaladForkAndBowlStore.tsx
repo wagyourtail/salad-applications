@@ -1,8 +1,9 @@
+import { SBWorkloadState } from '@saladtechnologies/salad-grpc-salad-bowl/salad/grpc/salad_bowl/v1/salad_bowl_pb'
 import { Duration } from 'luxon'
 import { action, computed, flow, observable, runInAction } from 'mobx'
 import { Subject } from 'rxjs'
-import { filter, map, takeUntil } from 'rxjs/operators'
-import { SaladBowlState } from '../../services/SaladFork/models/SaladBowlLoginResponse'
+import { map, takeUntil } from 'rxjs/operators'
+import { RetryConnectingToSaladBowl, SaladBowlState } from '../../services/SaladFork/models/SaladBowlLoginResponse'
 import * as Storage from '../../Storage'
 import { RootStore } from '../../Store'
 import { ErrorPageType } from '../../UIStore'
@@ -25,7 +26,9 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
   /** The total time we have been in the chopping state since the start button was pressed (ms) */
   private choppingTime?: number = undefined
 
-  private readonly destroySubscription = new Subject<void>()
+  private readonly choppingSubscription = new Subject<void>()
+
+  private readonly saladBowlSubscription = new Subject<void>()
 
   @observable
   public runningTime?: number = undefined
@@ -58,18 +61,36 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
   public plugin = new PluginInfo()
 
   @observable
-  public saladBowlConnected?: boolean = false
+  public saladBowlConnected?: boolean
+
+  @observable
+  public workloadState?: SBWorkloadState.AsObject[]
+
+  @action
+  private destroyChoppingSubscriptions(): void {
+    this.choppingSubscription.next()
+  }
 
   @action
   private destroySaladBowlSubscriptions(): void {
-    this.destroySubscription.next()
+    this.saladBowlSubscription.next()
+  }
+
+  @action
+  private destroyAllSubscriptions(): void {
+    this.destroyChoppingSubscriptions()
+    this.destroySaladBowlSubscriptions()
   }
 
   @computed
   get canRun() {
-    // Should also have a check if we are connected to Salad Bowl 2.0, have available workloads, have a workload enabled
     return (
-      this.store.auth.isAuthenticated !== undefined && this.store.auth.isAuthenticated && this.store.native.isNative
+      this.store.auth.isAuthenticated !== undefined &&
+      this.store.auth.isAuthenticated &&
+      this.store.native.isNative &&
+      this.saladBowlConnected !== undefined &&
+      this.saladBowlConnected &&
+      this.store.activeWorkloadsUIStore.hasCompatibleWorkloads
     )
   }
 
@@ -147,12 +168,12 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
     this.plugin.name = name
   }
 
-  @action private updatePluginVersion = (version: string) => {
-    this.plugin.version = version
-  }
-
   @action private resetPluginInfo = () => {
     this.plugin = new PluginInfo()
+  }
+
+  @action private updateWorkloadState = (workloadState: SBWorkloadState.AsObject[]) => {
+    this.workloadState = workloadState
   }
 
   private streamWorkloadData = () => {
@@ -194,7 +215,7 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
           }
         }),
       )
-      .pipe(takeUntil(this.destroySubscription))
+      .pipe(takeUntil(this.choppingSubscription))
       .subscribe((workloadData) => {
         if (workloadData !== undefined) {
           if (this.plugin.name !== undefined && this.plugin.name !== workloadData.minerName) {
@@ -216,16 +237,14 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
       })
   }
 
-  private streamMinerData = () => {
+  private streamWorkloadState = () => {
     this.store.saladFork
-      .minerStats$()
-      .pipe(map((resp) => resp.getStats()))
-      .pipe(filter((minerStats) => minerStats != null))
-      .pipe(takeUntil(this.destroySubscription))
-      .subscribe((minerStats) => {
-        const minerVersion = minerStats?.getMinerversion()
-        if (minerVersion) {
-          this.updatePluginVersion(minerVersion)
+      .workloadState$()
+      .pipe(map((resp) => resp.toObject()))
+      .pipe(takeUntil(this.saladBowlSubscription))
+      .subscribe((workloadState) => {
+        if (workloadState !== undefined) {
+          this.updateWorkloadState(workloadState.workloadstatesList)
         }
       })
   }
@@ -266,11 +285,8 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
           this.choppingTime = undefined
         }
 
-        // start streaming salad bowl data data
+        // start streaming workload data
         this.streamWorkloadData()
-        this.streamMinerData()
-
-        // TODO: this.plugin.algorithm = this.currentPluginDefinition.algorithm
 
         // TODO: This anaytics metric is probably not going to work anymore?
         // const gpusNames = this.store.machine.gpus.filter((x) => x && x.model).map((x) => x.model)
@@ -332,7 +348,37 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
       .catch((err) => console.log('error: ', err)) // TODO: Handle Error - Example Error Message - "Workload MUST Exist in SaladBowl"
   }
 
-  stop = (reason: StopReason) => {
+  public login = async (): Promise<void> => {
+    try {
+      const response = await this.store.saladFork.login()
+
+      if (response === RetryConnectingToSaladBowl.Message) {
+        await this.login()
+      } else {
+        this.setSaladBowlConnected(true)
+        this.getSaladBowlState(response || undefined)
+        this.streamWorkloadState()
+      }
+    } catch (error: any) {
+      this.setSaladBowlConnected(false)
+      this.store.startButtonUI.setStartButtonToolTip(
+        'We are currently unable to connect to Salad Bowl. Please make sure you are running on the latest version and contact support.',
+        true,
+      )
+      this.store.startButtonUI.setSupportNeeded(true)
+    }
+  }
+
+  public logout = async (): Promise<void> => {
+    try {
+      this.destroyAllSubscriptions()
+      this.store.saladFork.logout()
+    } catch (error: any) {
+      // TODO: Handle errors on logging out
+    }
+  }
+
+  public stop = (reason: StopReason) => {
     if (this.timeoutTimer != null) {
       clearTimeout(this.timeoutTimer)
       this.timeoutTimer = undefined
@@ -348,7 +394,7 @@ export class SaladForkAndBowlStore implements SaladBowlStoreInterface {
     this.plugin.algorithm = undefined
     this.plugin.status = PluginStatus.Stopped
     this.store.saladFork.stop() // this is promise that needs to be handled correctly
-    this.destroySaladBowlSubscriptions()
+    this.destroyChoppingSubscriptions()
 
     // should we remove this because it is a mixpanel tracking event
     if (this.isRunning) {

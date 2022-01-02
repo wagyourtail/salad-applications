@@ -1,23 +1,23 @@
 import { SaladBowlMessages, SaladBowlServices } from '@saladtechnologies/salad-grpc-salad-bowl'
 import {
-  MinerStatRequest,
-  MinerStatResponse,
+  WorkloadStatesRequest,
+  WorkloadStatesResponse,
   WorkloadStatus,
   WorkloadStatusRequest,
 } from '@saladtechnologies/salad-grpc-salad-bowl/salad/grpc/salad_bowl/v1/salad_bowl_pb'
 import type { AxiosInstance } from 'axios'
 import { Observable, Observer, Subscription } from 'rxjs'
-import type { GuiStateData, SaladBowlLoginResponse } from './models/SaladBowlLoginResponse'
+import type { SaladBowlLoginResponse } from './models/SaladBowlLoginResponse'
 import { RetryConnectingToSaladBowl, SaladBowlLoginResponseError } from './models/SaladBowlLoginResponse'
 import { SaladBowlLogoutResponse, SaladBowlLogoutResponseError } from './models/SaladBowlLogoutResponse'
 
 export interface SaladForkInterface {
   login: () => Promise<SaladBowlLoginResponse>
   logout: () => Promise<SaladBowlLogoutResponse>
-  minerStats$: () => Observable<MinerStatResponse>
   setPreferences: (preferences: Record<string, boolean>) => Promise<void>
   start: () => Promise<void>
   stop: () => Promise<void>
+  workloadState$: () => Observable<WorkloadStatesResponse>
   workloadStatuses$: () => Observable<WorkloadStatus>
 }
 
@@ -37,10 +37,8 @@ export class SaladFork implements SaladForkInterface {
   public login = async (): Promise<SaladBowlLoginResponse> => {
     try {
       const response = await this.axios.post('/api/v2/saladbowl/auth/login')
-
-      if (response.data) {
+      if (typeof response.data === 'string' && response.data.length > 0) {
         this.jwt = response.data
-
         try {
           const request = new SaladBowlMessages.LoginRequest()
           request.setJwt(this.jwt)
@@ -48,46 +46,25 @@ export class SaladFork implements SaladForkInterface {
           const loginResponse = await this.client.login(request)
 
           if (loginResponse.getSuccess()) {
-            const userPreferenceRequest = new SaladBowlMessages.GetUserPreferenceRequest()
-            const guiStateRequest = new SaladBowlMessages.GetGUIStateRequest()
-
-            const [userPreferencesResult, guiStateResult] = await Promise.allSettled([
-              this.client.getUserPreferences(userPreferenceRequest),
-              this.client.getGUIState(guiStateRequest),
-            ])
-
             let userPreferences: Record<string, boolean> = {}
 
-            if (userPreferencesResult.status === 'fulfilled') {
-              const preferences = userPreferencesResult.value.getPreferences()
+            const userPreferenceRequest = new SaladBowlMessages.GetUserPreferenceRequest()
+            try {
+              const userPreferencesResult = await this.client.getUserPreferences(userPreferenceRequest)
+              const preferences = userPreferencesResult.getPreferences()
               if (preferences) {
                 const preferencesMap = preferences.getPreferencesMap()
                 if (preferencesMap) {
                   userPreferences = Object.fromEntries(preferencesMap.entries())
                 }
               }
-            } else {
+            } catch {
               throw new Error(SaladBowlLoginResponseError.failedToGetUserPreferences)
-            }
-
-            let guiStateData: GuiStateData = {}
-
-            if (guiStateResult.status === 'fulfilled') {
-              const guiState = guiStateResult.value.getState()
-
-              guiStateData.isChopping = guiState?.hasChoptime()
-
-              const startTime = guiState?.getStart()
-              if (startTime) {
-                guiStateData.startTime = startTime.getSeconds()
-              }
-            } else {
-              throw new Error(SaladBowlLoginResponseError.failedToGetGuiState)
             }
 
             return {
               preferences: userPreferences,
-              runningState: guiStateData,
+              runningState: {},
             }
           } else {
             throw new Error(SaladBowlLoginResponseError.unableToLoginToSaladBowl)
@@ -136,16 +113,14 @@ export class SaladFork implements SaladForkInterface {
     await this.client.stop(stopRequest)
   }
 
-  public minerStats$ = (): Observable<MinerStatResponse> => {
-    return new Observable((observer: Observer<MinerStatResponse>) => {
-      var minerReq = new MinerStatRequest()
-      minerReq.setUpdateperiodsec(5)
-      let stream = this.client.minerStats(minerReq, {})
-      stream.on('data', (result) => observer.next(result as MinerStatResponse))
-      stream.on('error', (err) => console.log(err))
-      stream.on('end', () => {
-        observer.complete()
-      })
+  public workloadState$ = (): Observable<WorkloadStatesResponse> => {
+    let request = new WorkloadStatesRequest()
+
+    return new Observable((observer: Observer<WorkloadStatesResponse>) => {
+      let stream = this.client.workloadStates(request)
+      stream.on('data', (result) => observer.next(result as WorkloadStatesResponse))
+      stream.on('error', (err) => observer.error(err))
+      stream.on('end', () => observer.complete())
       return new Subscription(() => stream.cancel())
     })
   }

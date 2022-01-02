@@ -45,6 +45,10 @@ export class MachineStore {
         return
       }
 
+      if (store.saladBowl.saladBowlConnected === undefined) {
+        return
+      }
+
       await this.registerMachine()
     })
   }
@@ -147,7 +151,7 @@ export class MachineStore {
 
       return {
         model: gpu.model,
-        vram: gpu.memoryTotal || gpu.vram,
+        vram: gpu.memoryTotal || gpu.vram || 0,
         driverVersion: gpu.driverVersion,
         compatible: gpuPluginDefinitions.length > 0,
       }
